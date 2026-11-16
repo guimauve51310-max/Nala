@@ -1,0 +1,22 @@
+# =============================================================================
+# requirements.txt — Dépendances du projet Nala
+# -----------------------------------------------------------------------------
+# Installer avec :  pip install -r requirements.txt
+# =============================================================================
+
+# --- Interface graphique ---
+PySide6
+
+# --- Communication série GRBL ---
+pyserial
+
+# --- Import et manipulation de fichiers ---
+ezdxf           # Lecture DXF
+svgelements     # Lecture SVG
+Pillow          # Lecture d'images bitmap (JPG, PNG, BMP...)
+
+# --- Vectorisation d'image (Import JPG -> contours) ---
+potracer        # Vectorisation (portage Python pur de Potrace)
+
+# --- Calculs numériques ---
+numpy           # Utilisé par potracer, dithering, et image_loader

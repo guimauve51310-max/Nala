@@ -1,0 +1,1128 @@
+# =============================================================================
+# LaserCNC.py
+# -----------------------------------------------------------------------------
+# Rôle : Fenêtre principale de l'application LaserCNC.
+#
+# Version 17 : ajout de l'onglet "Mise en page"
+#   - Nouvel onglet Mise en page (étape 1 : affichage DXF)
+#   - Aucune autre modification sur les onglets existants
+# =============================================================================
+
+import sys
+import os
+from PySide6.QtCore import QTimer, Signal
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QComboBox, QLabel, QTabWidget, QGroupBox,
+    QTextEdit, QLineEdit, QGridLayout, QDoubleSpinBox, QMessageBox,
+    QFileDialog, QPlainTextEdit
+)
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from src.grbl.controller import GrblController
+from src.grbl.envoi_thread import EnvoiGcodeThread
+from src.ui.apercu import ApercuWidget
+from src.ui.mise_en_page import MiseEnPageWidget
+from serial.tools import list_ports
+
+
+# --- Constantes de configuration du jog ---------------------------------------
+PAS_DISPONIBLES = [0.1, 1.0, 10.0, 100.0]
+VITESSES_DISPONIBLES = [100.0, 500.0, 1000.0, 2000.0]
+VITESSE_DEFAUT = 500.0
+PAS_DEFAUT = 1.0
+
+# --- Protection anti-double-STOP ----------------------------------------------
+STOP_COOLDOWN = 2
+
+# --- Bornes du "Aller à X,Y" --------------------------------------------------
+DEPLACEMENT_MIN = -500.0
+DEPLACEMENT_MAX = 500.0
+
+# --- Filtres de fichiers G-code -----------------------------------------------
+FILTRES_GCODE = "Fichiers G-code (*.nc *.gcode *.ngc *.tap *.txt);;Tous les fichiers (*.*)"
+
+# --- Modes machine disponibles -------------------------------------------------
+MODES_MACHINE = [
+    ("Laser",     "laser"),
+    ("Fraiseuse", "fraiseuse"),
+]
+MODE_DEFAUT = "laser"
+
+
+class MainWindow(QMainWindow):
+    """Fenêtre principale de LaserCNC."""
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("LaserCNC")
+        self.resize(1100, 750)
+
+        self.grbl = GrblController()
+        self.dernier_wco = (0.0, 0.0, 0.0)
+        self.fichier_charge = None
+
+        self.thread_envoi = None
+        self.est_en_pause = False
+
+        self.mode_machine = MODE_DEFAUT
+
+        self.timer_statut = QTimer(self)
+        self.timer_statut.setInterval(300)
+        self.timer_statut.timeout.connect(self.rafraichir_statut)
+
+        self.stop_restant = 0
+        self.timer_stop = QTimer(self)
+        self.timer_stop.setInterval(1000)
+        self.timer_stop.timeout.connect(self.decrementer_stop)
+
+        racine = QWidget()
+        layout_racine = QVBoxLayout(racine)
+        layout_racine.setContentsMargins(6, 6, 6, 6)
+        layout_racine.setSpacing(6)
+
+        # --- Barre supérieure : sélecteur de mode ---
+        barre_mode = QHBoxLayout()
+        barre_mode.addWidget(QLabel("Mode machine :"))
+        self.combo_mode = QComboBox()
+        for libelle, cle in MODES_MACHINE:
+            self.combo_mode.addItem(libelle, cle)
+        for idx, (_, cle) in enumerate(MODES_MACHINE):
+            if cle == MODE_DEFAUT:
+                self.combo_mode.setCurrentIndex(idx)
+                break
+        self.combo_mode.setMinimumWidth(140)
+        self.combo_mode.currentIndexChanged.connect(self.changer_mode)
+        barre_mode.addWidget(self.combo_mode)
+
+        self.label_avert_mode = QLabel("")
+        self.label_avert_mode.setStyleSheet(
+            "color: white; background-color: #c0392b; "
+            "font-weight: bold; padding: 4px 10px; border-radius: 3px;"
+        )
+        barre_mode.addWidget(self.label_avert_mode)
+
+        barre_mode.addStretch()
+        layout_racine.addLayout(barre_mode)
+
+        # --- Onglets ---
+        tabs = QTabWidget()
+        tabs.addTab(self.construire_onglet_connexion(), "Connexion")
+        tabs.addTab(self.construire_onglet_console(), "Console")
+        tabs.addTab(self.construire_onglet_jog(), "Jog")
+        tabs.addTab(self.construire_onglet_fichier(), "Fichier")
+        tabs.addTab(self.construire_onglet_apercu(), "Aperçu")
+        tabs.addTab(self.construire_onglet_mise_en_page(), "Mise en page")
+        layout_racine.addWidget(tabs)
+
+        self.setCentralWidget(racine)
+        self.appliquer_avertissement_mode()
+
+    # -------------------------------------------------------------------------
+    # Gestion du mode machine
+    # -------------------------------------------------------------------------
+
+    def changer_mode(self):
+        cle = self.combo_mode.currentData()
+        self.mode_machine = cle
+        self.afficher_console(f"— Mode machine : {self.combo_mode.currentText()} —")
+        self.appliquer_avertissement_mode()
+
+    def appliquer_avertissement_mode(self):
+        if self.mode_machine == "fraiseuse":
+            self.label_avert_mode.setText(
+                "⚠ FRISEUSE : la pause n'arrête PAS la broche "
+                "(limitation GRBL). Gardez la main sur l'arrêt d'urgence."
+            )
+        else:
+            self.label_avert_mode.setText("")
+
+    # -------------------------------------------------------------------------
+    # ONGLET 1 : Connexion
+    # -------------------------------------------------------------------------
+
+    def construire_onglet_connexion(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        groupe = QGroupBox("Connexion à la machine")
+        ligne = QHBoxLayout(groupe)
+
+        ligne.addWidget(QLabel("Port :"))
+        self.combo_ports = QComboBox()
+        self.combo_ports.setMinimumWidth(300)
+        ligne.addWidget(self.combo_ports)
+
+        self.btn_rafraichir = QPushButton("Rafraîchir")
+        self.btn_rafraichir.clicked.connect(self.rafraichir_ports)
+        ligne.addWidget(self.btn_rafraichir)
+
+        self.btn_connecter = QPushButton("Connecter")
+        self.btn_connecter.clicked.connect(self.basculer_connexion)
+        ligne.addWidget(self.btn_connecter)
+
+        layout.addWidget(groupe)
+
+        self.label_statut = QLabel("Déconnecté")
+        self.label_statut.setStyleSheet("font-size: 16px; padding: 10px;")
+        layout.addWidget(self.label_statut)
+
+        layout.addStretch()
+        self.rafraichir_ports()
+        return widget
+
+    # -------------------------------------------------------------------------
+    # ONGLET 2 : Console
+    # -------------------------------------------------------------------------
+
+    def construire_onglet_console(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        self.console = QTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setStyleSheet("font-family: Consolas, monospace; font-size: 12px;")
+        layout.addWidget(self.console)
+
+        ligne = QHBoxLayout()
+        self.champ_commande = QLineEdit()
+        self.champ_commande.setPlaceholderText("Tapez une commande GRBL (ex : $$ , $X , $H ...)")
+        self.champ_commande.returnPressed.connect(self.envoyer_commande_manuelle)
+        ligne.addWidget(self.champ_commande)
+
+        self.btn_envoyer = QPushButton("Envoyer")
+        self.btn_envoyer.clicked.connect(self.envoyer_commande_manuelle)
+        ligne.addWidget(self.btn_envoyer)
+
+        self.btn_effacer = QPushButton("Effacer")
+        self.btn_effacer.clicked.connect(self.effacer_console)
+        ligne.addWidget(self.btn_effacer)
+
+        layout.addLayout(ligne)
+        return widget
+
+    # -------------------------------------------------------------------------
+    # ONGLET 3 : Jog
+    # -------------------------------------------------------------------------
+
+    def construire_onglet_jog(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        groupe_position = QGroupBox("Position travail")
+        ligne_position = QHBoxLayout(groupe_position)
+        style_pos = "font-family: Consolas, monospace; font-size: 22px; font-weight: bold; padding: 4px 12px;"
+
+        self.label_pos_x = QLabel("X :   ---.---")
+        self.label_pos_x.setStyleSheet(style_pos)
+        ligne_position.addWidget(self.label_pos_x)
+
+        self.label_pos_y = QLabel("Y :   ---.---")
+        self.label_pos_y.setStyleSheet(style_pos)
+        ligne_position.addWidget(self.label_pos_y)
+
+        ligne_position.addStretch()
+
+        self.label_etat = QLabel("État : ---")
+        self.label_etat.setStyleSheet("font-family: Consolas, monospace; font-size: 18px; padding: 4px 12px;")
+        ligne_position.addWidget(self.label_etat)
+
+        layout.addWidget(groupe_position)
+
+        groupe_reglages = QGroupBox("Réglages du jog")
+        ligne_reglages = QHBoxLayout(groupe_reglages)
+
+        ligne_reglages.addWidget(QLabel("Pas (mm) :"))
+        self.combo_pas = QComboBox()
+        for pas in PAS_DISPONIBLES:
+            self.combo_pas.addItem(f"{pas} mm", pas)
+        self.combo_pas.setCurrentIndex(PAS_DISPONIBLES.index(PAS_DEFAUT))
+        ligne_reglages.addWidget(self.combo_pas)
+
+        ligne_reglages.addSpacing(20)
+        ligne_reglages.addWidget(QLabel("Vitesse (mm/min) :"))
+        self.combo_vitesse = QComboBox()
+        for v in VITESSES_DISPONIBLES:
+            self.combo_vitesse.addItem(f"{v}", v)
+        self.combo_vitesse.setCurrentIndex(VITESSES_DISPONIBLES.index(VITESSE_DEFAUT))
+        ligne_reglages.addWidget(self.combo_vitesse)
+
+        ligne_reglages.addStretch()
+        layout.addWidget(groupe_reglages)
+
+        groupe_jog = QGroupBox("Déplacement manuel")
+        grid = QGridLayout(groupe_jog)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(4, 1)
+
+        self.btn_y_plus = QPushButton("Y +")
+        self.btn_y_plus.setMinimumSize(80, 50)
+        self.btn_y_plus.clicked.connect(lambda: self.jog("Y", +1))
+        grid.addWidget(self.btn_y_plus, 0, 2)
+
+        self.btn_x_moins = QPushButton("X -")
+        self.btn_x_moins.setMinimumSize(80, 50)
+        self.btn_x_moins.clicked.connect(lambda: self.jog("X", -1))
+        grid.addWidget(self.btn_x_moins, 1, 1)
+
+        self.btn_stop = QPushButton("STOP")
+        self.btn_stop.setMinimumSize(100, 50)
+        self.btn_stop.setStyleSheet("background-color: #c0392b; color: white; font-weight: bold;")
+        self.btn_stop.clicked.connect(self.stop_urgence)
+        grid.addWidget(self.btn_stop, 1, 2)
+
+        self.btn_x_plus = QPushButton("X +")
+        self.btn_x_plus.setMinimumSize(80, 50)
+        self.btn_x_plus.clicked.connect(lambda: self.jog("X", +1))
+        grid.addWidget(self.btn_x_plus, 1, 3)
+
+        self.btn_y_moins = QPushButton("Y -")
+        self.btn_y_moins.setMinimumSize(80, 50)
+        self.btn_y_moins.clicked.connect(lambda: self.jog("Y", -1))
+        grid.addWidget(self.btn_y_moins, 2, 2)
+
+        layout.addWidget(groupe_jog)
+
+        groupe_origine = QGroupBox("Origine travail")
+        ligne_origine = QHBoxLayout(groupe_origine)
+
+        self.btn_definir_origine = QPushButton("Définir origine ici")
+        self.btn_definir_origine.setMinimumHeight(40)
+        self.btn_definir_origine.clicked.connect(self.definir_origine_ici)
+        ligne_origine.addWidget(self.btn_definir_origine)
+
+        self.btn_retour_origine = QPushButton("Retour origine (0,0)")
+        self.btn_retour_origine.setMinimumHeight(40)
+        self.btn_retour_origine.clicked.connect(self.retour_origine)
+        ligne_origine.addWidget(self.btn_retour_origine)
+
+        self.btn_deverrouiller = QPushButton("Déverrouiller ($X)")
+        self.btn_deverrouiller.setMinimumHeight(40)
+        self.btn_deverrouiller.clicked.connect(self.deverrouiller)
+        ligne_origine.addWidget(self.btn_deverrouiller)
+
+        layout.addWidget(groupe_origine)
+
+        groupe_aller = QGroupBox("Aller à (position absolue)")
+        ligne_aller = QHBoxLayout(groupe_aller)
+
+        ligne_aller.addWidget(QLabel("X (mm) :"))
+        self.spin_x = QDoubleSpinBox()
+        self.spin_x.setRange(DEPLACEMENT_MIN, DEPLACEMENT_MAX)
+        self.spin_x.setDecimals(1)
+        self.spin_x.setSingleStep(1.0)
+        self.spin_x.setValue(0.0)
+        ligne_aller.addWidget(self.spin_x)
+
+        ligne_aller.addWidget(QLabel("Y (mm) :"))
+        self.spin_y = QDoubleSpinBox()
+        self.spin_y.setRange(DEPLACEMENT_MIN, DEPLACEMENT_MAX)
+        self.spin_y.setDecimals(1)
+        self.spin_y.setSingleStep(1.0)
+        self.spin_y.setValue(0.0)
+        ligne_aller.addWidget(self.spin_y)
+
+        self.btn_aller = QPushButton("Aller à ce point")
+        self.btn_aller.setMinimumHeight(40)
+        self.btn_aller.clicked.connect(self.aller_a_position)
+        ligne_aller.addWidget(self.btn_aller)
+
+        ligne_aller.addStretch()
+        layout.addWidget(groupe_aller)
+
+        # --- Point laser (appui maintenu) ---
+        groupe_point_laser = QGroupBox("Point laser (voir où frappe le laser)")
+        ligne_point = QHBoxLayout(groupe_point_laser)
+
+        ligne_point.addWidget(QLabel("Puissance :"))
+        self.spin_puissance_point = QDoubleSpinBox()
+        self.spin_puissance_point.setRange(0.1, 10.0)     # limite securite a 10 %
+        self.spin_puissance_point.setDecimals(1)
+        self.spin_puissance_point.setSingleStep(0.5)
+        self.spin_puissance_point.setValue(1.0)           # defaut 1 %
+        self.spin_puissance_point.setSuffix(" %")
+        self.spin_puissance_point.setMinimumWidth(80)
+        ligne_point.addWidget(self.spin_puissance_point)
+
+        self.btn_point_laser = QPushButton("🔴 Maintenir pour allumer")
+        self.btn_point_laser.setMinimumHeight(40)
+        self.btn_point_laser.setStyleSheet(
+            "background-color: #e67e22; color: white; font-weight: bold;"
+        )
+        self.btn_point_laser.setEnabled(False)            # active a la connexion
+        self.btn_point_laser.pressed.connect(self.allumer_point_laser)
+        self.btn_point_laser.released.connect(self.eteindre_point_laser)
+        ligne_point.addWidget(self.btn_point_laser)
+
+        ligne_point.addStretch()
+        layout.addWidget(groupe_point_laser)
+
+        info = QLabel("⚠️  STOP = Ctrl-X GRBL (arrêt immédiat). "
+                      "Toujours avoir la main sur l'alimentation physique de la machine.")
+        info.setStyleSheet("color: #c0392b; padding: 8px;")
+        layout.addWidget(info)
+
+        layout.addStretch()
+        return widget
+
+    # -------------------------------------------------------------------------
+    # ONGLET 4 : Fichier
+    # -------------------------------------------------------------------------
+
+    def construire_onglet_fichier(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        groupe_haut = QGroupBox("Fichier G-code")
+        ligne_haut = QHBoxLayout(groupe_haut)
+
+        self.btn_charger = QPushButton("Charger un fichier…")
+        self.btn_charger.setMinimumHeight(40)
+        self.btn_charger.clicked.connect(self.charger_fichier)
+        ligne_haut.addWidget(self.btn_charger)
+
+        ligne_haut.addSpacing(20)
+        self.label_fichier = QLabel("Aucun fichier chargé")
+        self.label_fichier.setStyleSheet("font-family: Consolas, monospace; padding: 4px;")
+        ligne_haut.addWidget(self.label_fichier)
+
+        ligne_haut.addSpacing(20)
+        self.label_temps_fichier = QLabel("")
+        self.label_temps_fichier.setStyleSheet(
+            "font-family: Consolas, monospace; padding: 4px; color: #555;"
+        )
+        ligne_haut.addWidget(self.label_temps_fichier)
+
+        ligne_haut.addStretch()
+        layout.addWidget(groupe_haut)
+
+        self.apercu_gcode = QPlainTextEdit()
+        self.apercu_gcode.setReadOnly(True)
+        self.apercu_gcode.setStyleSheet("font-family: Consolas, monospace; font-size: 12px;")
+        layout.addWidget(self.apercu_gcode)
+
+        groupe_bas = QGroupBox("Envoi à la machine")
+        ligne_bas = QHBoxLayout(groupe_bas)
+
+        self.btn_envoyer_fichier = QPushButton("▶  ENVOYER À LA MACHINE")
+        self.btn_envoyer_fichier.setMinimumHeight(50)
+        self.btn_envoyer_fichier.setStyleSheet(
+            "background-color: #27ae60; color: white; font-weight: bold; font-size: 14px;"
+        )
+        self.btn_envoyer_fichier.clicked.connect(self.envoyer_fichier)
+        ligne_bas.addWidget(self.btn_envoyer_fichier)
+
+        self.btn_pause = QPushButton("⏸  PAUSE")
+        self.btn_pause.setMinimumHeight(50)
+        self.btn_pause.setStyleSheet(
+            "background-color: #e67e22; color: white; font-weight: bold; font-size: 14px;"
+        )
+        self.btn_pause.setEnabled(False)
+        self.btn_pause.clicked.connect(self.basculer_pause)
+        ligne_bas.addWidget(self.btn_pause)
+
+        self.label_progression = QLabel("En attente")
+        self.label_progression.setStyleSheet("font-family: Consolas, monospace; padding: 4px 12px;")
+        ligne_bas.addWidget(self.label_progression)
+
+        ligne_bas.addStretch()
+        layout.addWidget(groupe_bas)
+
+        avert = QLabel("⚠️  Avant d'envoyer : s'assurer que l'origine est définie, "
+                       "que la trajectoire est libre, et avoir la main sur l'alimentation.")
+        avert.setStyleSheet("color: #c0392b; padding: 8px;")
+        layout.addWidget(avert)
+
+        return widget
+
+    # -------------------------------------------------------------------------
+    # ONGLET 5 : Aperçu (parcours + suivi temps réel)
+    # -------------------------------------------------------------------------
+
+    def construire_onglet_apercu(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.apercu = ApercuWidget()
+        layout.addWidget(self.apercu)
+
+        note = QLabel("Astuce : molette = zoom • clic-glisser = déplacer la vue • "
+                      "« Recentrer » recadre sur le parcours")
+        note.setStyleSheet("color: #888; padding: 4px 8px; font-size: 11px;")
+        layout.addWidget(note)
+
+        return widget
+
+    # -------------------------------------------------------------------------
+    # ONGLET 6 : Mise en page (étape 1 : affichage DXF)
+    # -------------------------------------------------------------------------
+
+    def construire_onglet_mise_en_page(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.mise_en_page = MiseEnPageWidget()
+        self.mise_en_page.widget_parent = self
+        layout.addWidget(self.mise_en_page)
+
+        return widget
+
+    # -------------------------------------------------------------------------
+    # Actions : ports et connexion
+    # -------------------------------------------------------------------------
+
+    def rafraichir_ports(self):
+        self.combo_ports.clear()
+        for p in list_ports.comports():
+            self.combo_ports.addItem(f"{p.device}  —  {p.description}", p.device)
+
+    def basculer_connexion(self):
+        if self.grbl.est_connecte:
+            self.timer_statut.stop()
+            self.grbl.deconnecter()
+            self.btn_connecter.setText("Connecter")
+            self.label_statut.setText("Déconnecté")
+            self.label_pos_x.setText("X :   ---.---")
+            self.label_pos_y.setText("Y :   ---.---")
+            self.label_etat.setText("État : ---")
+            self.apercu.vider()
+            # Desactivation du bouton Point laser
+            self.btn_point_laser.setEnabled(False)
+            self.afficher_console("— Déconnecté —")
+        else:
+            if self.combo_ports.count() == 0:
+                self.label_statut.setText("Aucun port disponible.")
+                return
+            port = self.combo_ports.currentData()
+            try:
+                self.grbl.connecter(port)
+            except Exception as e:
+                self.label_statut.setText(f"Erreur : {e}")
+                return
+            self.btn_connecter.setText("Déconnecter")
+            self.label_statut.setText("Connecté — en attente du statut…")
+            self.afficher_console(f"— Connecté sur {port} —")
+            self.timer_statut.start()
+            # Activation du bouton "Point laser"
+            self.btn_point_laser.setEnabled(True)
+
+    def rafraichir_statut(self):
+        statut = self.grbl.lire_statut()
+        if not statut:
+            return
+        self.label_statut.setText(f"Statut : {statut}")
+        self.mettre_a_jour_position(statut)
+
+    def mettre_a_jour_position(self, ligne_statut):
+        if not (ligne_statut.startswith("<") and ligne_statut.endswith(">")):
+            return
+
+        contenu = ligne_statut[1:-1]
+        morceaux = contenu.split("|")
+        if not morceaux:
+            return
+
+        etat = morceaux[0]
+        mpos = None
+        for m in morceaux[1:]:
+            if m.startswith("MPos:"):
+                try:
+                    mpos = tuple(float(v) for v in m[5:].split(","))
+                except ValueError:
+                    pass
+            elif m.startswith("WCO:"):
+                try:
+                    self.dernier_wco = tuple(float(v) for v in m[4:].split(","))
+                except ValueError:
+                    pass
+
+        if mpos is not None:
+            wpos_x = mpos[0] - self.dernier_wco[0]
+            wpos_y = mpos[1] - self.dernier_wco[1]
+            self.label_pos_x.setText(f"X : {wpos_x:8.3f}")
+            self.label_pos_y.setText(f"Y : {wpos_y:8.3f}")
+            # Pendant l'envoi, c'est le thread qui emet la position
+            # (voir on_position_emise). Le timer est stoppe.
+            self.apercu.maj_position(wpos_x, wpos_y)
+
+        self.label_etat.setText(f"État : {etat}")
+
+    # -------------------------------------------------------------------------
+    # Actions : console
+    # -------------------------------------------------------------------------
+
+    def afficher_console(self, texte):
+        self.console.append(texte)
+
+    def envoyer_commande_manuelle(self):
+        commande = self.champ_commande.text().strip()
+        if not commande:
+            return
+        if not self.grbl.est_connecte:
+            self.afficher_console(">> (non connecté, commande ignorée)")
+            return
+
+        timer_actif = self.timer_statut.isActive()
+        if timer_actif:
+            self.timer_statut.stop()
+
+        self.afficher_console(f">> {commande}")
+        try:
+            reponses = self.grbl.envoyer(commande)
+            for ligne in reponses:
+                self.afficher_console(f"<< {ligne}")
+        except Exception as e:
+            self.afficher_console(f"!! Erreur : {e}")
+
+        self.champ_commande.clear()
+        if timer_actif:
+            self.timer_statut.start()
+
+    def effacer_console(self):
+        self.console.clear()
+
+    # -------------------------------------------------------------------------
+    # Actions : jog
+    # -------------------------------------------------------------------------
+
+    def jog(self, axe, direction):
+        if not self.grbl.est_connecte:
+            self.afficher_console(">> (jog ignoré : non connecté)")
+            return
+
+        pas = self.combo_pas.currentData()
+        vitesse = self.combo_vitesse.currentData()
+        delta = pas * direction
+
+        commande = f"$J=G91 G21 {axe}{delta} F{vitesse}"
+        self.afficher_console(f">> {commande}")
+
+        timer_actif = self.timer_statut.isActive()
+        if timer_actif:
+            self.timer_statut.stop()
+
+        try:
+            reponses = self.grbl.envoyer(commande)
+            for ligne in reponses:
+                self.afficher_console(f"<< {ligne}")
+        except Exception as e:
+            self.afficher_console(f"!! Erreur jog : {e}")
+
+        if timer_actif:
+            self.timer_statut.start()
+
+    # -------------------------------------------------------------------------
+    # Actions : STOP
+    # -------------------------------------------------------------------------
+
+    def stop_urgence(self):
+        if not self.grbl.est_connecte:
+            return
+
+        self.grbl.envoyer_octet_immediat(0x18)
+        self.afficher_console(">> [STOP] Ctrl-X envoyé à GRBL")
+
+        if self.thread_envoi is not None and self.thread_envoi.isRunning():
+            if self.est_en_pause:
+                self.thread_envoi.reprendre()
+                self.est_en_pause = False
+                self.btn_pause.setText("⏸  PAUSE")
+            self.thread_envoi.arreter()
+            self.afficher_console(">> [STOP] Demande d'arrêt du thread d'envoi.")
+
+        self.stop_restant = STOP_COOLDOWN
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.setText(f"STOP ({self.stop_restant}s)")
+        self.timer_stop.start()
+
+    def decrementer_stop(self):
+        self.stop_restant -= 1
+        if self.stop_restant <= 0:
+            self.timer_stop.stop()
+            self.btn_stop.setEnabled(True)
+            self.btn_stop.setText("STOP")
+        else:
+            self.btn_stop.setText(f"STOP ({self.stop_restant}s)")
+
+    # -------------------------------------------------------------------------
+    # Actions : origine travail
+    # -------------------------------------------------------------------------
+
+    def definir_origine_ici(self):
+        if not self.grbl.est_connecte:
+            self.afficher_console(">> (origine ignorée : non connecté)")
+            return
+
+        commande = "G10 L20 P1 X0 Y0"
+        self.afficher_console(f">> {commande}  (définir origine ici)")
+
+        timer_actif = self.timer_statut.isActive()
+        if timer_actif:
+            self.timer_statut.stop()
+
+        try:
+            reponses = self.grbl.envoyer(commande)
+            for ligne in reponses:
+                self.afficher_console(f"<< {ligne}")
+        except Exception as e:
+            self.afficher_console(f"!! Erreur origine : {e}")
+
+        if timer_actif:
+            self.timer_statut.start()
+
+    def retour_origine(self):
+        if not self.grbl.est_connecte:
+            self.afficher_console(">> (retour origine ignoré : non connecté)")
+            return
+
+        commande = "G90 G0 X0 Y0"
+        self.afficher_console(f">> {commande}  (retour origine travail)")
+
+        timer_actif = self.timer_statut.isActive()
+        if timer_actif:
+            self.timer_statut.stop()
+
+        try:
+            reponses = self.grbl.envoyer(commande, timeout=10.0)
+            for ligne in reponses:
+                self.afficher_console(f"<< {ligne}")
+        except Exception as e:
+            self.afficher_console(f"!! Erreur retour origine : {e}")
+
+        if timer_actif:
+            self.timer_statut.start()
+
+    def deverrouiller(self):
+        if not self.grbl.est_connecte:
+            self.afficher_console(">> ($X ignoré : non connecté)")
+            return
+
+        self.afficher_console(">> $X  (déverrouillage)")
+        try:
+            reponses = self.grbl.envoyer("$X")
+            for ligne in reponses:
+                self.afficher_console(f"<< {ligne}")
+        except Exception as e:
+            self.afficher_console(f"!! Erreur $X : {e}")
+
+    # -------------------------------------------------------------------------
+    # Actions : "Aller à X,Y"
+    # -------------------------------------------------------------------------
+
+    def aller_a_position(self):
+        if not self.grbl.est_connecte:
+            self.afficher_console(">> (aller à ignoré : non connecté)")
+            return
+
+        x = self.spin_x.value()
+        y = self.spin_y.value()
+
+        reponse = QMessageBox.question(
+            self,
+            "Confirmer le déplacement",
+            f"Déplacer la machine à :\n\n"
+            f"    X = {x:.1f} mm\n"
+            f"    Y = {y:.1f} mm\n\n"
+            f"Ce déplacement se fera en mode rapide (G0).\n"
+            f"Vérifier que la trajectoire est libre.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reponse != QMessageBox.Yes:
+            self.afficher_console(">> (aller à annulé par l'utilisateur)")
+            return
+
+        commande = f"G90 G0 X{x:.3f} Y{y:.3f}"
+        self.afficher_console(f">> {commande}  (aller à position absolue)")
+
+        timer_actif = self.timer_statut.isActive()
+        if timer_actif:
+            self.timer_statut.stop()
+
+        try:
+            reponses = self.grbl.envoyer(commande, timeout=10.0)
+            for ligne in reponses:
+                self.afficher_console(f"<< {ligne}")
+        except Exception as e:
+            self.afficher_console(f"!! Erreur aller à : {e}")
+
+        if timer_actif:
+            self.timer_statut.start()
+
+    # -------------------------------------------------------------------------
+    # Actions : fichier G-code (chargement)
+    # -------------------------------------------------------------------------
+
+    def charger_fichier(self):
+        chemin, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choisir un fichier G-code",
+            "",
+            FILTRES_GCODE
+        )
+        if not chemin:
+            return
+
+        try:
+            with open(chemin, "r", encoding="utf-8", errors="replace") as f:
+                contenu = f.read()
+        except Exception as e:
+            QMessageBox.critical(self, "Erreur de lecture", f"Impossible de lire le fichier :\n{e}")
+            return
+
+        self.fichier_charge = chemin
+        self.apercu_gcode.setPlainText(contenu)
+
+        lignes = contenu.splitlines()
+        nb_total = len(lignes)
+        nb_non_vides = sum(1 for l in lignes if l.strip())
+
+        nom = os.path.basename(chemin)
+        self.label_fichier.setText(
+            f"{nom}   —   {nb_total} lignes ({nb_non_vides} non vides)"
+        )
+        self.afficher_console(f"— Fichier chargé : {chemin}  ({nb_non_vides} lignes)")
+
+        # Estimation du temps
+        try:
+            from src.core.estimateur_temps import (
+                estimer_temps_gcode, formater_temps
+            )
+            secondes = estimer_temps_gcode(lignes)
+            self.label_temps_fichier.setText(
+                f"Temps estimé : {formater_temps(secondes)}"
+            )
+        except Exception:
+            self.label_temps_fichier.setText("")
+
+        self.apercu.charger_parcours(lignes)
+
+    # -------------------------------------------------------------------------
+    # Actions : ENVOI DU FICHIER (threadé)
+    # -------------------------------------------------------------------------
+
+    def envoyer_fichier(self):
+        if not self.grbl.est_connecte:
+            QMessageBox.warning(self, "Non connecté",
+                                "Veuillez d'abord connecter la machine.")
+            return
+        if not self.fichier_charge:
+            QMessageBox.warning(self, "Aucun fichier",
+                                "Veuillez d'abord charger un fichier G-code.")
+            return
+        if self.thread_envoi is not None and self.thread_envoi.isRunning():
+            QMessageBox.information(self, "Envoi en cours",
+                                    "Un envoi est déjà en cours.")
+            return
+
+        texte = self.apercu_gcode.toPlainText()
+        lignes_brutes = texte.splitlines()
+        lignes = [l.strip() for l in lignes_brutes if l.strip()]
+        total = len(lignes)
+
+        if total == 0:
+            QMessageBox.information(self, "Fichier vide",
+                                    "Le fichier ne contient aucune ligne à envoyer.")
+            return
+
+        nom = os.path.basename(self.fichier_charge)
+
+        if self.mode_machine == "fraiseuse":
+            rappel = ("⚠ MODE FRAISEUSE ⚠\n"
+                      "La pause n'arrêtera PAS la broche.\n"
+                      "Gardez la main sur l'arrêt d'urgence.\n")
+        else:
+            rappel = "Mode LASER : la pause coupera automatiquement le faisceau.\n"
+
+        reponse = QMessageBox.question(
+            self,
+            "Confirmer l'envoi",
+            f"Envoyer « {nom} » à la machine ?\n\n"
+            f"{rappel}\n"
+            f"Rappels :\n"
+            f"  • l'origine doit être définie\n"
+            f"  • la trajectoire doit être libre\n"
+            f"  • ayez la main sur l'alimentation physique",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reponse != QMessageBox.Yes:
+            self.afficher_console(">> (envoi annulé par l'utilisateur)")
+            return
+
+        self.est_en_pause = False
+        self.btn_pause.setText("⏸  PAUSE")
+
+        self.mettre_interface_en_envoi(True)
+
+        self.afficher_console(f"═══ Début d'envoi : {nom} — {total} lignes ═══")
+        self.afficher_console(f"    Mode machine : {self.combo_mode.currentText()}")
+        self.label_progression.setText(f"Envoi : 0 / {total}")
+
+        # On stoppe le timer_statut pendant l'envoi : le thread d'envoi
+        # monopolise le port serie. C'est lui qui emet la position via le
+        # signal position_emise (voir on_position_emise).
+        self.timer_statut.stop()
+
+        self.thread_envoi = EnvoiGcodeThread(self.grbl, lignes)
+        self.thread_envoi.progression.connect(self.on_envoi_progression)
+        self.thread_envoi.ligne_envoyee.connect(self.on_envoi_ligne)
+        self.thread_envoi.termine.connect(self.on_envoi_termine)
+        self.thread_envoi.position_emise.connect(self.on_position_emise)
+        self.thread_envoi.start()
+
+    def mettre_interface_en_envoi(self, en_cours):
+        actif = not en_cours
+
+        self.btn_x_plus.setEnabled(actif)
+        self.btn_x_moins.setEnabled(actif)
+        self.btn_y_plus.setEnabled(actif)
+        self.btn_y_moins.setEnabled(actif)
+
+        self.btn_definir_origine.setEnabled(actif)
+        self.btn_retour_origine.setEnabled(actif)
+        self.btn_deverrouiller.setEnabled(actif)
+        self.btn_aller.setEnabled(actif)
+
+        self.btn_envoyer.setEnabled(actif)
+        self.champ_commande.setEnabled(actif)
+
+        self.btn_envoyer_fichier.setEnabled(actif)
+        self.btn_charger.setEnabled(actif)
+
+        self.combo_mode.setEnabled(actif)
+
+        self.btn_pause.setEnabled(en_cours)
+
+        if not en_cours:
+            self.btn_pause.setText("⏸  PAUSE")
+            self.est_en_pause = False
+
+    # -------------------------------------------------------------------------
+    # Slots du thread d'envoi
+    # -------------------------------------------------------------------------
+
+    def on_envoi_progression(self, numero, total):
+        self.label_progression.setText(f"Envoi : {numero} / {total}")
+
+    def on_position_emise(self, x, y):
+        # Appelee par le thread d'envoi apres chaque ligne.
+        # Met a jour le marqueur de l'apercu + les labels de position.
+        self.label_pos_x.setText(f"X : {x:8.3f}")
+        self.label_pos_y.setText(f"Y : {y:8.3f}")
+        self.apercu.maj_position(x, y)
+
+    def on_envoi_ligne(self, numero, ligne):
+        self.afficher_console(f">> [{numero}] {ligne}")
+
+    def on_envoi_termine(self, succes, message):
+        if succes:
+            self.afficher_console(f"═══ {message} ═══")
+            self.label_progression.setText(message)
+        else:
+            self.afficher_console(f"═══ ÉCHEC : {message} ═══")
+            self.label_progression.setText(f"Échec : {message}")
+
+        self.mettre_interface_en_envoi(False)
+
+        if self.thread_envoi is not None:
+            self.thread_envoi.wait(2000)
+            self.thread_envoi = None
+
+        if self.grbl.est_connecte:
+            self.timer_statut.start()
+
+        # On remontre le marqueur de l'Aperçu une fois l'envoi terminé
+        self.apercu.item_marqueur.setVisible(True)
+
+    # -------------------------------------------------------------------------
+    # PAUSE / REPRISE
+    # -------------------------------------------------------------------------
+
+    # -------------------------------------------------------------------------
+    # Point laser (appui maintenu)
+    # -------------------------------------------------------------------------
+
+    def allumer_point_laser(self):
+        """
+        Allume le laser a la puissance choisie (appui maintenu sur le bouton).
+        Sequence GRBL : M3 S<valeur> + G1 F<vitesse> (pour activer le PWM).
+        ⚠️ La securite depend de l'appui maintenu : si l'utilisateur relache,
+        le bouton emet 'released' et le laser s'eteint.
+        """
+        if not self.grbl.est_connecte:
+            return
+
+        puissance_pct = self.spin_puissance_point.value()
+
+        # Recuperation de S_MAX ($30 de GRBL)
+        s_max = 1000  # valeur par defaut
+        try:
+            reponses = self.grbl.envoyer("$$", timeout=2.0)
+            for r in reponses:
+                if r.startswith("$30="):
+                    s_max = int(r.split("=")[1])
+                    break
+        except Exception:
+            pass
+
+        s_valeur = int(round(puissance_pct / 100.0 * s_max))
+
+        # Sequence : M3 S<valeur> + G1 F<vitesse> (active le PWM)
+        try:
+            self.grbl.envoyer(f"M3 S{s_valeur}", timeout=2.0)
+            self.grbl.envoyer("G1 F500", timeout=2.0)
+            self.afficher_console(
+                f">> [POINT LASER] Allume a {puissance_pct}% (S{s_valeur})"
+            )
+        except Exception as e:
+            self.afficher_console(f"!! Erreur allumage point laser : {e}")
+
+    def eteindre_point_laser(self):
+        """
+        Eteint le laser (relachement du bouton).
+        Sequence : M5 + G0 (pour forcer la coupure PWM).
+        """
+        if not self.grbl.est_connecte:
+            return
+
+        try:
+            self.grbl.envoyer("M5", timeout=2.0)
+            self.grbl.envoyer("G0", timeout=2.0)
+            self.afficher_console(">> [POINT LASER] Eteint")
+        except Exception as e:
+            self.afficher_console(f"!! Erreur extinction point laser : {e}")
+
+    # -------------------------------------------------------------------------
+    # Cadrage : parcourt le rectangle de la bbox avec laser faible
+    # -------------------------------------------------------------------------
+
+    def executer_cadrage(self, x_min, y_min, x_max, y_max, cible_txt):
+        """
+        Execute un cadrage : parcourt le rectangle (x_min,y_min)-(x_max,y_max)
+        avec un laser faible (0.5 %). La tete RESTE au point de depart.
+
+        Appelee par MiseEnPageWidget.cadrer_selection().
+        """
+        if not self.grbl.est_connecte:
+            QMessageBox.warning(self, "Non connecté",
+                                "Connectez la machine avant de cadrer.")
+            return
+
+        # --- Conversion 0.5 % en S ---
+        s_max = 1000
+        try:
+            reponses = self.grbl.envoyer("$$", timeout=2.0)
+            for r in reponses:
+                if r.startswith("$30="):
+                    s_max = int(r.split("=")[1])
+                    break
+        except Exception:
+            pass
+
+        s_valeur = max(1, int(round(0.5 / 100.0 * s_max)))  # 0.5 %
+        vitesse = 1000  # mm/min
+
+        try:
+            # 1) Va au coin 1 (laser eteint)
+            self.grbl.envoyer("S0", timeout=2.0)
+            self.grbl.envoyer(
+                f"G0 X{x_min:.3f} Y{y_min:.3f}", timeout=5.0
+            )
+
+            # 2) Allume le laser faiblement
+            self.grbl.envoyer(f"M3 S{s_valeur}", timeout=2.0)
+            self.grbl.envoyer(f"G1 F{vitesse}", timeout=2.0)
+
+            # 3) Trace les 3 autres cotes et ferme
+            self.grbl.envoyer(
+                f"G1 X{x_max:.3f} Y{y_min:.3f}", timeout=10.0
+            )
+            self.grbl.envoyer(
+                f"G1 X{x_max:.3f} Y{y_max:.3f}", timeout=10.0
+            )
+            self.grbl.envoyer(
+                f"G1 X{x_min:.3f} Y{y_max:.3f}", timeout=10.0
+            )
+            self.grbl.envoyer(
+                f"G1 X{x_min:.3f} Y{y_min:.3f}", timeout=10.0
+            )
+
+            # 4) Eteint le laser
+            self.grbl.envoyer("M5", timeout=2.0)
+            self.grbl.envoyer("G0", timeout=2.0)
+
+            self.afficher_console(
+                f"— Cadrage terminé : {cible_txt}  "
+                f"X[{x_min:.1f} → {x_max:.1f}]  Y[{y_min:.1f} → {y_max:.1f}]"
+            )
+
+        except Exception as e:
+            # En cas d'erreur, on force l'extinction
+            try:
+                self.grbl.envoyer("M5", timeout=2.0)
+                self.grbl.envoyer("G0", timeout=2.0)
+            except Exception:
+                pass
+            self.afficher_console(f"!! Erreur cadrage : {e}")
+
+    def basculer_pause(self):
+        if not self.grbl.est_connecte:
+            return
+        if self.thread_envoi is None or not self.thread_envoi.isRunning():
+            return
+
+        try:
+            if not self.est_en_pause:
+                self.grbl.envoyer_octet_immediat(0x21)
+                self.thread_envoi.pause()
+                self.est_en_pause = True
+                self.btn_pause.setText("▶  REPRENDRE")
+
+                if self.mode_machine == "fraiseuse":
+                    self.afficher_console(
+                        ">> [PAUSE] Feed hold envoyé. "
+                        "⚠ La broche continue de tourner."
+                    )
+                else:
+                    self.afficher_console(">> [PAUSE] Feed hold envoyé (faisceau coupé auto).")
+            else:
+                self.grbl.envoyer_octet_immediat(0x7E)
+                self.thread_envoi.reprendre()
+                self.est_en_pause = False
+                self.btn_pause.setText("⏸  PAUSE")
+                self.afficher_console(">> [REPRISE] Cycle start envoyé à GRBL")
+
+        except Exception as e:
+            self.afficher_console(f"!! Erreur pause/reprise : {type(e).__name__} — {e}")
+
+        # -------------------------------------------------------------------------
+        # Fermeture propre
+        # -------------------------------------------------------------------------
+
+    def closeEvent(self, event):
+        if self.thread_envoi is not None and self.thread_envoi.isRunning():
+            if self.est_en_pause:
+                self.thread_envoi.reprendre()
+            self.thread_envoi.arreter()
+            self.thread_envoi.wait(2000)
+
+        self.timer_statut.stop()
+        self.timer_stop.stop()
+        if self.grbl.est_connecte:
+            self.grbl.deconnecter()
+        event.accept()
+
+
+def main():
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

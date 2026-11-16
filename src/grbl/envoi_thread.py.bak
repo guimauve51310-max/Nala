@@ -1,0 +1,153 @@
+# =============================================================================
+# src/grbl/envoi_thread.py
+# -----------------------------------------------------------------------------
+# Rôle : Moteur d'envoi de G-code en ARRIERE-PLAN avec support PAUSE/REPRISE.
+#
+# Version RESTAUREE : envoi synchrone ligne par ligne (attente du 'ok').
+# Le buffering et le suivi temps reel du marqueur ont ete retires pour
+# garantir la fiabilite de la gravure.
+#
+# Le filtre des commentaires (;) et lignes vides est conserve : il evite
+# d'envoyer des lignes inutiles a GRBL et accelere legerement l'envoi.
+# =============================================================================
+
+import time
+from PySide6.QtCore import QThread, Signal
+
+
+TIMEOUT_LIGNE_DEFAUT = 10.0
+GRANULARITE_ATTENTE = 0.1
+
+
+class EnvoiGcodeThread(QThread):
+    """Thread d'envoi de G-code avec pause / reprise."""
+
+    progression = Signal(int, int)
+    ligne_envoyee = Signal(int, str)
+    termine = Signal(bool, str)
+    position_emise = Signal(float, float)   # position travail (x, y) pendant l'envoi
+
+    def __init__(self, controleur, lignes, timeout_ligne=TIMEOUT_LIGNE_DEFAUT):
+        super().__init__()
+        self.controleur = controleur
+        self.lignes = lignes
+        self.timeout_ligne = timeout_ligne
+        self._arret_demande = False
+        self._pause_demandee = False
+        self._dernier_wco = (0.0, 0.0, 0.0)   # mis a jour a chaque lecture de statut
+
+    def arreter(self):
+        self._arret_demande = True
+
+    def pause(self):
+        self._pause_demandee = True
+
+    def reprendre(self):
+        self._pause_demandee = False
+
+    def _lire_et_emettre_position(self):
+        """
+        Envoie '?' a GRBL, lit la reponse, parse MPos: et WCO:,
+        calcule la position travail (MPos - WCO) et emet position_emise(x, y).
+
+        En cas d'echec (pas de reponse, format inattendu), on ne fait rien :
+        on ne veut pas casser l'envoi pour un statut manquant.
+        """
+        try:
+            reponse = self.controleur.lire_statut()
+        except Exception:
+            return
+
+        if not reponse or not (reponse.startswith("<") and reponse.endswith(">")):
+            return
+
+        contenu = reponse[1:-1]
+        morceaux = contenu.split("|")
+        mpos = None
+        wco = self._dernier_wco
+        for m in morceaux[1:]:
+            if m.startswith("MPos:"):
+                try:
+                    mpos = tuple(float(v) for v in m[5:].split(","))
+                except ValueError:
+                    pass
+            elif m.startswith("WCO:"):
+                try:
+                    wco = tuple(float(v) for v in m[4:].split(","))
+                except ValueError:
+                    pass
+
+        if mpos is None:
+            return
+
+        self._dernier_wco = wco
+        x = mpos[0] - wco[0]
+        y = mpos[1] - wco[1]
+        self.position_emise.emit(x, y)
+
+    def _est_ligne_utile(self, ligne):
+        # Retourne False si la ligne est un commentaire ou vide.
+        s = ligne.strip()
+        if not s:
+            return False
+        if s.startswith(";"):
+            return False
+        if s.startswith("("):
+            return False
+        return True
+
+    def run(self):
+        # Filtre les lignes utiles (sans commentaires ni vides)
+        lignes_utiles = [l for l in self.lignes if self._est_ligne_utile(l)]
+        total = len(lignes_utiles)
+
+        if total == 0:
+            self.termine.emit(True, "Fichier vide, rien a envoyer.")
+            return
+
+        for i, ligne in enumerate(lignes_utiles, start=1):
+            # Arret total
+            if self._arret_demande:
+                self.termine.emit(
+                    False,
+                    f"Envoi interrompu par l'utilisateur (ligne {i}/{total})."
+                )
+                return
+
+            # Attente pause
+            while self._pause_demandee and not self._arret_demande:
+                time.sleep(GRANULARITE_ATTENTE)
+
+            if self._arret_demande:
+                self.termine.emit(
+                    False,
+                    f"Envoi interrompu par l'utilisateur (ligne {i}/{total})."
+                )
+                return
+
+            # Envoi synchrone : write + attente 'ok'
+            try:
+                reponses = self.controleur.envoyer(ligne, timeout=self.timeout_ligne)
+            except Exception as e:
+                self.termine.emit(False, f"Erreur d'envoi ligne {i} : {e}")
+                return
+
+            # Detection erreur GRBL
+            for r in reponses:
+                if r.startswith("error"):
+                    self.termine.emit(
+                        False,
+                        f"Erreur GRBL ligne {i} : {r}  (commande : {ligne})"
+                    )
+                    return
+
+            self.ligne_envoyee.emit(i, ligne)
+            if i == 1 or i % 5 == 0 or i == total:
+                self.progression.emit(i, total)
+
+            # A chaque ligne executee, on lit la position reelle et on
+            # l'emet. Cela donne un suivi temps reel du marqueur (legerement
+            # ralenti par l'aller-retour du '?', mais fluide).
+            self._lire_et_emettre_position()
+
+        self.termine.emit(True, f"Envoi termine : {total} lignes.")

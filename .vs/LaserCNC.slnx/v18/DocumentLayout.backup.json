@@ -1,0 +1,122 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "C:\\LaserCNC\\LaserCNC\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\LaserCNC\\LaserCNC\\src\\ui\\mise_en_page.py||{8B382828-6202-11D1-8870-0000F87579D2}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:src\\ui\\mise_en_page.py||{8B382828-6202-11D1-8870-0000F87579D2}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{CB364A34-1FC3-49A0-B1BE-6B4206395F34}|LaserCNC.pyproj|C:\\LaserCNC\\LaserCNC\\scr\\ui\\mise_en_page.py||{8B382828-6202-11D1-8870-0000F87579D2}",
+      "RelativeMoniker": "D:0:0:{CB364A34-1FC3-49A0-B1BE-6B4206395F34}|LaserCNC.pyproj|solutionrelative:scr\\ui\\mise_en_page.py||{8B382828-6202-11D1-8870-0000F87579D2}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{CB364A34-1FC3-49A0-B1BE-6B4206395F34}|LaserCNC.pyproj|C:\\LaserCNC\\LaserCNC\\test_imports.py||{8B382828-6202-11D1-8870-0000F87579D2}",
+      "RelativeMoniker": "D:0:0:{CB364A34-1FC3-49A0-B1BE-6B4206395F34}|LaserCNC.pyproj|solutionrelative:test_imports.py||{8B382828-6202-11D1-8870-0000F87579D2}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{CB364A34-1FC3-49A0-B1BE-6B4206395F34}|LaserCNC.pyproj|C:\\LaserCNC\\LaserCNC\\LaserCNC.py||{8B382828-6202-11D1-8870-0000F87579D2}",
+      "RelativeMoniker": "D:0:0:{CB364A34-1FC3-49A0-B1BE-6B4206395F34}|LaserCNC.pyproj|solutionrelative:LaserCNC.py||{8B382828-6202-11D1-8870-0000F87579D2}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{CB364A34-1FC3-49A0-B1BE-6B4206395F34}|LaserCNC.pyproj|C:\\LaserCNC\\LaserCNC\\requirements.txt||{8B382828-6202-11D1-8870-0000F87579D2}",
+      "RelativeMoniker": "D:0:0:{CB364A34-1FC3-49A0-B1BE-6B4206395F34}|LaserCNC.pyproj|solutionrelative:requirements.txt||{8B382828-6202-11D1-8870-0000F87579D2}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{CB364A34-1FC3-49A0-B1BE-6B4206395F34}|LaserCNC.pyproj|C:\\LaserCNC\\LaserCNC\\test_grbl.py||{8B382828-6202-11D1-8870-0000F87579D2}",
+      "RelativeMoniker": "D:0:0:{CB364A34-1FC3-49A0-B1BE-6B4206395F34}|LaserCNC.pyproj|solutionrelative:test_grbl.py||{8B382828-6202-11D1-8870-0000F87579D2}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 0,
+          "Children": [
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "mise_en_page.py",
+              "DocumentMoniker": "C:\\LaserCNC\\LaserCNC\\src\\ui\\mise_en_page.py",
+              "RelativeDocumentMoniker": "src\\ui\\mise_en_page.py",
+              "ToolTip": "C:\\LaserCNC\\LaserCNC\\src\\ui\\mise_en_page.py",
+              "RelativeToolTip": "src\\ui\\mise_en_page.py",
+              "ViewState": "AgIAACYBAAAAAAAAAAAwwEEBAAAkAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.002457|",
+              "WhenOpened": "2026-09-15T17:03:49.238Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "mise_en_page.py",
+              "DocumentMoniker": "C:\\LaserCNC\\LaserCNC\\scr\\ui\\mise_en_page.py",
+              "RelativeDocumentMoniker": "scr\\ui\\mise_en_page.py",
+              "ToolTip": "C:\\LaserCNC\\LaserCNC\\scr\\ui\\mise_en_page.py",
+              "RelativeToolTip": "scr\\ui\\mise_en_page.py",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.002457|",
+              "WhenOpened": "2026-09-15T16:59:10.493Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "test_imports.py",
+              "DocumentMoniker": "C:\\LaserCNC\\LaserCNC\\test_imports.py",
+              "RelativeDocumentMoniker": "test_imports.py",
+              "ToolTip": "C:\\LaserCNC\\LaserCNC\\test_imports.py",
+              "RelativeToolTip": "test_imports.py",
+              "ViewState": "AgIAACsAAAAAAAAAAAAwwEYAAAAUAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.002457|",
+              "WhenOpened": "2026-09-15T16:48:09.103Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 4,
+              "Title": "requirements.txt",
+              "DocumentMoniker": "C:\\LaserCNC\\LaserCNC\\requirements.txt",
+              "RelativeDocumentMoniker": "requirements.txt",
+              "ToolTip": "C:\\LaserCNC\\LaserCNC\\requirements.txt",
+              "RelativeToolTip": "requirements.txt",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAoAAAAKAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.003109|",
+              "WhenOpened": "2026-09-15T16:18:27.073Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 5,
+              "Title": "test_grbl.py",
+              "DocumentMoniker": "C:\\LaserCNC\\LaserCNC\\test_grbl.py",
+              "RelativeDocumentMoniker": "test_grbl.py",
+              "ToolTip": "C:\\LaserCNC\\LaserCNC\\test_grbl.py",
+              "RelativeToolTip": "test_grbl.py",
+              "ViewState": "AgIAAB0AAAAAAAAAAAAYwDUAAAAKAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.002457|",
+              "WhenOpened": "2026-09-14T14:36:58.941Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 3,
+              "Title": "LaserCNC.py",
+              "DocumentMoniker": "C:\\LaserCNC\\LaserCNC\\LaserCNC.py",
+              "RelativeDocumentMoniker": "LaserCNC.py",
+              "ToolTip": "C:\\LaserCNC\\LaserCNC\\LaserCNC.py",
+              "RelativeToolTip": "LaserCNC.py",
+              "ViewState": "AgIAAFMBAAAAAAAAAAAwwFsBAAANAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.002457|",
+              "WhenOpened": "2026-09-14T14:07:13.421Z",
+              "EditorCaption": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

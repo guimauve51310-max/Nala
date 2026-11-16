@@ -1,0 +1,282 @@
+# =============================================================================
+# patch.py
+# -----------------------------------------------------------------------------
+# Rôle : RETOUR EN ARRIERE propre.
+#        - Restaure envoi_thread.py : envoi synchrone ligne par ligne
+#        - Nettoie controller.py : retire ecrire_ligne, lire_reponse, sleep
+#
+# Le filtre de commentaires est CONSERVE (utile et sans risque).
+# Le suivi temps reel du marqueur est ABANDONNE pour l'instant.
+#
+# - Sauvegarde les 2 fichiers en .bak
+# - Verifie la syntaxe avec ast.parse
+#
+# Usage : depuis C:\LaserCNC\LaserCNC\
+#     env\Scripts\python.exe patch.py
+# =============================================================================
+
+import ast
+import os
+import shutil
+
+
+CHEMIN_THREAD = os.path.join("src", "grbl", "envoi_thread.py")
+CHEMIN_CTRL = os.path.join("src", "grbl", "controller.py")
+BAK_THREAD = CHEMIN_THREAD + ".bak"
+BAK_CTRL = CHEMIN_CTRL + ".bak"
+
+
+# =============================================================================
+# NOUVEAU CONTENU COMPLET : envoi_thread.py (version restaurée)
+# =============================================================================
+NOUVEAU_THREAD = '''# =============================================================================
+# src/grbl/envoi_thread.py
+# -----------------------------------------------------------------------------
+# Rôle : Moteur d'envoi de G-code en ARRIERE-PLAN avec support PAUSE/REPRISE.
+#
+# Version RESTAUREE : envoi synchrone ligne par ligne (attente du 'ok').
+# Le buffering et le suivi temps reel du marqueur ont ete retires pour
+# garantir la fiabilite de la gravure.
+#
+# Le filtre des commentaires (;) et lignes vides est conserve : il evite
+# d'envoyer des lignes inutiles a GRBL et accelere legerement l'envoi.
+# =============================================================================
+
+import time
+from PySide6.QtCore import QThread, Signal
+
+
+TIMEOUT_LIGNE_DEFAUT = 10.0
+GRANULARITE_ATTENTE = 0.1
+
+
+class EnvoiGcodeThread(QThread):
+    """Thread d'envoi de G-code avec pause / reprise."""
+
+    progression = Signal(int, int)
+    ligne_envoyee = Signal(int, str)
+    termine = Signal(bool, str)
+
+    def __init__(self, controleur, lignes, timeout_ligne=TIMEOUT_LIGNE_DEFAUT):
+        super().__init__()
+        self.controleur = controleur
+        self.lignes = lignes
+        self.timeout_ligne = timeout_ligne
+        self._arret_demande = False
+        self._pause_demandee = False
+
+    def arreter(self):
+        self._arret_demande = True
+
+    def pause(self):
+        self._pause_demandee = True
+
+    def reprendre(self):
+        self._pause_demandee = False
+
+    def _est_ligne_utile(self, ligne):
+        # Retourne False si la ligne est un commentaire ou vide.
+        s = ligne.strip()
+        if not s:
+            return False
+        if s.startswith(";"):
+            return False
+        if s.startswith("("):
+            return False
+        return True
+
+    def run(self):
+        # Filtre les lignes utiles (sans commentaires ni vides)
+        lignes_utiles = [l for l in self.lignes if self._est_ligne_utile(l)]
+        total = len(lignes_utiles)
+
+        if total == 0:
+            self.termine.emit(True, "Fichier vide, rien a envoyer.")
+            return
+
+        for i, ligne in enumerate(lignes_utiles, start=1):
+            # Arret total
+            if self._arret_demande:
+                self.termine.emit(
+                    False,
+                    f"Envoi interrompu par l'utilisateur (ligne {i}/{total})."
+                )
+                return
+
+            # Attente pause
+            while self._pause_demandee and not self._arret_demande:
+                time.sleep(GRANULARITE_ATTENTE)
+
+            if self._arret_demande:
+                self.termine.emit(
+                    False,
+                    f"Envoi interrompu par l'utilisateur (ligne {i}/{total})."
+                )
+                return
+
+            # Envoi synchrone : write + attente 'ok'
+            try:
+                reponses = self.controleur.envoyer(ligne, timeout=self.timeout_ligne)
+            except Exception as e:
+                self.termine.emit(False, f"Erreur d'envoi ligne {i} : {e}")
+                return
+
+            # Detection erreur GRBL
+            for r in reponses:
+                if r.startswith("error"):
+                    self.termine.emit(
+                        False,
+                        f"Erreur GRBL ligne {i} : {r}  (commande : {ligne})"
+                    )
+                    return
+
+            self.ligne_envoyee.emit(i, ligne)
+            if i == 1 or i % 5 == 0 or i == total:
+                self.progression.emit(i, total)
+
+        self.termine.emit(True, f"Envoi termine : {total} lignes.")
+'''
+
+
+# =============================================================================
+# NOUVEAU CONTENU COMPLET : controller.py (version restaurée)
+# =============================================================================
+NOUVEAU_CTRL = '''# =============================================================================
+# src/grbl/controller.py
+# -----------------------------------------------------------------------------
+# Rôle : Encapsule toute la communication avec une carte GRBL.
+#
+# Version RESTAUREE : envoi synchrone uniquement (envoyer + attente ok).
+# Les methodes ecrire_ligne / lire_reponse (pour le buffering) ont ete
+# retirees.
+# =============================================================================
+
+import time
+import threading
+import serial
+
+
+class GrblController:
+    """Controleur de communication avec une carte GRBL."""
+
+    BAUDRATE_DEFAUT = 115200
+
+    def __init__(self, baudrate=BAUDRATE_DEFAUT):
+        self.baudrate = baudrate
+        self.serial = None
+        self._verrou_ecriture = threading.Lock()
+
+    # -------------------------------------------------------------------------
+    # Connexion / deconnexion
+    # -------------------------------------------------------------------------
+
+    def connecter(self, port):
+        self.serial = serial.Serial(port, self.baudrate, timeout=0.2)
+        time.sleep(2)
+        self.serial.reset_input_buffer()
+        return True
+
+    def deconnecter(self):
+        if self.serial and self.serial.is_open:
+            self.serial.close()
+        self.serial = None
+
+    @property
+    def est_connecte(self):
+        return self.serial is not None and self.serial.is_open
+
+    # -------------------------------------------------------------------------
+    # Envoi de commandes
+    # -------------------------------------------------------------------------
+
+    def envoyer(self, commande, attendre_ok=True, timeout=3.0):
+        # Envoie une commande terminee par \\n et lit la reponse.
+        if not self.est_connecte:
+            raise RuntimeError("Non connecte : appelez connecter() d'abord.")
+
+        with self._verrou_ecriture:
+            self.serial.write((commande + "\\n").encode())
+
+        lignes = []
+        fin = time.time() + timeout
+
+        while time.time() < fin:
+            ligne = self.serial.readline().decode(errors="ignore").strip()
+            if not ligne:
+                continue
+
+            lignes.append(ligne)
+
+            if attendre_ok and (ligne == "ok" or ligne.startswith("error")):
+                break
+
+        return lignes
+
+    def envoyer_octet_immediat(self, octet):
+        # Envoie un octet brut sans \\n (Ctrl-X, !, ~).
+        if not self.est_connecte:
+            return
+        with self._verrou_ecriture:
+            self.serial.write(bytes([octet]))
+
+    # -------------------------------------------------------------------------
+    # Lecture du statut temps reel
+    # -------------------------------------------------------------------------
+
+    def lire_statut(self):
+        # Envoie "?" et renvoie la ligne de statut brute.
+        if not self.est_connecte:
+            return None
+        with self._verrou_ecriture:
+            self.serial.write(b"?")
+        return self.serial.readline().decode(errors="ignore").strip() or None
+'''
+
+
+def verifier(contenu, nom):
+    try:
+        ast.parse(contenu)
+        print(f"  Syntaxe {nom} OK")
+        return True
+    except SyntaxError as e:
+        print(f"  ERREUR SYNTAXE {nom} : ligne {e.lineno}, {e.msg}")
+        return False
+
+
+def main():
+    # --- Sauvegardes ---
+    if os.path.isfile(CHEMIN_THREAD):
+        shutil.copyfile(CHEMIN_THREAD, BAK_THREAD)
+        print(f"Sauvegarde creee : {BAK_THREAD}")
+    if os.path.isfile(CHEMIN_CTRL):
+        shutil.copyfile(CHEMIN_CTRL, BAK_CTRL)
+        print(f"Sauvegarde creee : {BAK_CTRL}")
+
+    # --- Verification syntaxe des nouveaux contenus ---
+    print()
+    print("=== Verification syntaxe des nouveaux fichiers ===")
+    ok = True
+    ok = verifier(NOUVEAU_THREAD, "envoi_thread") and ok
+    ok = verifier(NOUVEAU_CTRL, "controller") and ok
+
+    if not ok:
+        print("ECHEC : les nouveaux fichiers ne compilent pas. Aucune ecriture.")
+        return
+
+    # --- Ecriture ---
+    print()
+    print("=== Ecriture ===")
+    with open(CHEMIN_THREAD, "w", encoding="utf-8") as f:
+        f.write(NOUVEAU_THREAD)
+    print(f"Fichier ecrit : {CHEMIN_THREAD}")
+
+    with open(CHEMIN_CTRL, "w", encoding="utf-8") as f:
+        f.write(NOUVEAU_CTRL)
+    print(f"Fichier ecrit : {CHEMIN_CTRL}")
+
+    print()
+    print("=== TERMINE ===")
+
+
+if __name__ == "__main__":
+    main()
