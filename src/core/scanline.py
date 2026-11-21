@@ -193,14 +193,17 @@ def generer_scanline(contours, espacement_mm, angle_deg=0.0,
         # - Si 2 intersections -> 1 segment (cas normal)
         # - Si 4 intersections -> 2 segments (contour + trou)
         # - Si 6 -> 3 segments, etc.
-        for j in range(0, len(xs) - 1, 2):
+        retour = sens == "aller_retour" and i % 2 == 1
+        paires = range(0, len(xs) - 1, 2)
+        # Au retour, parcourir aussi les segments de droite a gauche.
+        for j in reversed(paires) if retour else paires:
             x_start = xs[j]
             x_end = xs[j + 1]
 
             if x_end <= x_start:
                 continue
 
-            if sens == "aller_retour" and (i % 2 == 1):
+            if retour:
                 segments_tournes.append((x_end, y_ligne, x_start, y_ligne))
             else:
                 segments_tournes.append((x_start, y_ligne, x_end, y_ligne))
